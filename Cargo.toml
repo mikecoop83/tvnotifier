@@ -1,0 +1,19 @@
+[package]
+edition = "2021"
+name = "tvnotifier"
+version = "0.1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+chrono = {version = "0"}
+confy = {version = "0"}
+go-flag = {version = "0"}
+lettre = {version = "0"}
+openssl = {version = "0"}
+postgres-openssl = {version = "0"}
+reqwest = {version = "0"}
+serde = {version = "1.0", features = ["derive"]}
+serde_json = "1.0"
+tokio = {version = "1", features = ["full"]}
+tokio-postgres = {version = "0"}
