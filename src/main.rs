@@ -20,7 +20,6 @@ struct Config {
     smtp_host: String,
     smtp_user: String,
     smtp_password: String,
-    smtp_name: String,
     from_email: String,
     to_emails: Vec<String>,
 }
