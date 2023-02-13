@@ -14,7 +14,8 @@ use std::fs;
 use tokio_postgres::{self};
 
 const FUTURE_LIMIT_DAYS: u64 = 7;
-const DATETIME_FORMAT: &str = "%a. %b. %d %l:%M %p";
+const DATE_TIME_FORMAT: &str = "%a. %b. %d %l:%M %p";
+const DATE_FORMAT: &str = "%a. %b. %d";
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -39,7 +40,7 @@ impl fmt::Display for Show {
         write!(
             f,
             "{}: {} ({})",
-            self.show_time.format(DATETIME_FORMAT),
+            self.show_time.format(DATE_TIME_FORMAT),
             self.name,
             self.episode_name
         )
@@ -92,10 +93,7 @@ fn send_email(shows: &Vec<Show>, config: &Config) -> Result<(), Box<dyn Error>> 
     }
 
     let email = builder
-        .subject(format!(
-            "Upcoming shows for {}",
-            today.format(DATETIME_FORMAT)
-        ))
+        .subject(format!("Upcoming shows for {}", today.format(DATE_FORMAT)))
         .singlepart(SinglePart::html(message))
         .unwrap();
 
