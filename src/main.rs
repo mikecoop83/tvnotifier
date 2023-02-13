@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Days, Local};
 use lettre::{
     message::SinglePart, transport::smtp::authentication::Credentials, Message, SmtpTransport,
     Transport,
@@ -12,6 +12,9 @@ use std::fmt;
 use std::fmt::Formatter;
 use std::fs;
 use tokio_postgres::{self};
+
+const FUTURE_LIMIT_DAYS: u64 = 7;
+const DATETIME_FORMAT: &str = "%a. %b. %d %l:%M %p";
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -36,7 +39,7 @@ impl fmt::Display for Show {
         write!(
             f,
             "{}: {} ({})",
-            self.show_time.format("%Y-%m-%d %l:%M %p"),
+            self.show_time.format(DATETIME_FORMAT),
             self.name,
             self.episode_name
         )
@@ -89,7 +92,10 @@ fn send_email(shows: &Vec<Show>, config: &Config) -> Result<(), Box<dyn Error>> 
     }
 
     let email = builder
-        .subject(format!("Upcoming shows for {}", today))
+        .subject(format!(
+            "Upcoming shows for {}",
+            today.format(DATETIME_FORMAT)
+        ))
         .singlepart(SinglePart::html(message))
         .unwrap();
 
@@ -194,8 +200,15 @@ async fn get_shows_parallel(show_ids: Vec<i32>) -> Result<Vec<Show>, Box<dyn Err
         }))
     }
     let mut shows = vec![];
+    let today = Local::now().date_naive();
+    let future_date_limit = today
+        .checked_add_days(Days::new(FUTURE_LIMIT_DAYS))
+        .unwrap();
     for show_handle in show_handles {
         if let Some(show) = show_handle.await?.unwrap() {
+            if show.show_time.date_naive() > future_date_limit {
+                continue;
+            }
             shows.push(show)
         }
     }
