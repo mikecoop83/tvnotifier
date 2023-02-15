@@ -30,6 +30,7 @@ struct Config {
 
 #[derive(Debug)]
 struct Show {
+    id: i32,
     name: String,
     episode_name: String,
     show_time: DateTime<chrono::Local>,
@@ -41,6 +42,18 @@ impl fmt::Display for Show {
             f,
             "{}: {} ({})",
             self.show_time.format(DATE_TIME_FORMAT),
+            self.name,
+            self.episode_name
+        )
+    }
+}
+
+impl Show {
+    fn html(&self) -> String {
+        format!(
+            "{}: <a href=\"https://www.tvmaze.com/shows/{}\">{}</a> ({})",
+            self.show_time.format(DATE_TIME_FORMAT),
+            self.id,
             self.name,
             self.episode_name
         )
@@ -80,11 +93,12 @@ fn send_email(shows: &Vec<Show>, config: &Config) -> Result<(), Box<dyn Error>> 
             after = "</b>";
         }
         message.push_str(before);
-        message.push_str(show.to_string().as_str());
+        message.push_str(show.html().as_str());
         message.push_str(after);
         message.push('\n');
     }
     message.push_str("</pre>");
+    message.push_str("<br /><br /><a href=\"https://tvnotifier-ui.vercel.app\">TVNotifier UI</a>");
 
     let mut builder = Message::builder().from(config.from_email.parse().unwrap());
 
@@ -135,11 +149,12 @@ async fn get_show_ids(config: &Config) -> Result<Vec<i32>, Box<dyn Error>> {
     Ok(ids)
 }
 
-fn parse_show(show_name: &str, episode_details: &Map<String, Value>) -> Show {
+fn parse_show(show_id: i32, show_name: &str, episode_details: &Map<String, Value>) -> Show {
     let episode_name = episode_details["name"].as_str().unwrap_or_default();
     let airstamp = episode_details["airstamp"].as_str().unwrap_or_default();
     let show_time = DateTime::parse_from_rfc3339(airstamp).unwrap_or_default();
     Show {
+        id: show_id,
         name: show_name.to_owned(),
         episode_name: episode_name.to_owned(),
         show_time: show_time.with_timezone(&chrono::Local),
@@ -164,6 +179,7 @@ async fn get_next_episode(show_id: i32) -> Result<Option<Show>, Box<dyn Error>> 
     let prev_episode = &embedded["previousepisode"];
     if prev_episode.is_object() {
         let prev_show = parse_show(
+            show_id,
             show_name,
             prev_episode
                 .as_object()
@@ -178,6 +194,7 @@ async fn get_next_episode(show_id: i32) -> Result<Option<Show>, Box<dyn Error>> 
         return Ok(None);
     }
     let next_show = parse_show(
+        show_id,
         show_name,
         next_episode
             .as_object()
