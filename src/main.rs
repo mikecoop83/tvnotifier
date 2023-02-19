@@ -15,6 +15,7 @@ use tokio_postgres::{self};
 
 const DATE_TIME_FORMAT: &str = "%a. %b. %d %l:%M %p";
 const DATE_FORMAT: &str = "%a. %b. %d";
+const FUTURE_DAY_LIMIT: u64 = 7;
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -53,7 +54,7 @@ impl Show {
             self.show_time.format(DATE_TIME_FORMAT),
             self.id,
             self.name,
-            self.episode_name
+            self.episode_name,
         )
     }
 }
@@ -86,65 +87,68 @@ async fn main() {
 fn send_email(
     shows: &Vec<Show>,
     config: &Config,
-    subscriptions: Vec<Subscription>,
+    subscriptions: Vec<String>,
 ) -> Result<(), Box<dyn Error>> {
-    for sub in subscriptions {
-        println!(
-            "Sending notification email to {} with {} day(s) of shows",
-            sub.email, sub.day_limit
-        );
-        let today = Local::now().date_naive();
-        let future_date_limit = today
-            .checked_add_days(Days::new(sub.day_limit as u64))
-            .unwrap();
-        let mut message = "<pre>".to_owned();
-        let mut show_count = 0;
-        for show in shows {
-            if show.show_time.date_naive() > future_date_limit {
-                continue;
-            }
-            show_count += 1;
-            let mut before = "";
-            let mut after = "";
-            if show.show_time.date_naive() == today {
-                before = "<b>";
-                after = "</b>";
-            }
-            message.push_str(before);
+    let today = Local::now().date_naive();
+    let future_date_limit = today.checked_add_days(Days::new(FUTURE_DAY_LIMIT)).unwrap();
+    let today = Local::now().date_naive();
+    let mut today_shows = vec![];
+    let mut future_shows = vec![];
+    for show in shows {
+        if show.show_time.date_naive() > future_date_limit {
+            break;
+        }
+        if show.show_time.date_naive() == today {
+            today_shows.push(show);
+        } else {
+            future_shows.push(show);
+        }
+    }
+    let mut message = "<pre><b>Today's shows:<br />".to_owned();
+    if today_shows.len() > 0 {
+        for show in today_shows {
             message.push_str(show.html().as_str());
-            message.push_str(after);
-            message.push('\n');
+            message.push_str("<br />");
         }
-        message.push_str("</pre>");
-        if show_count == 0 {
-            message.push_str("<br /><br /><i>No upcoming shows.</i>")
+    } else {
+        message.push_str("</i>Nothing airing today.</i>");
+    }
+    message.push_str("</b><br /><br />");
+
+    if future_shows.len() > 0 {
+        message.push_str("Future shows:<br />");
+        for show in future_shows {
+            message.push_str(show.html().as_str());
+            message.push_str("<br />");
         }
-        message
-            .push_str("<br /><br /><a href=\"https://tvnotifier-ui.vercel.app\">TVNotifier UI</a>");
+    }
+    message.push_str("<br /><br />Manage subscriptions on <a href=\"https://tvnotifier-ui.vercel.app\">TV Notifier UI</a>");
+    message.push_str("</pre>");
 
-        let builder = Message::builder()
-            .from(config.from_email.parse().unwrap())
-            .to(sub.email.parse().unwrap());
+    let mut builder = Message::builder().from(config.from_email.parse().unwrap());
 
-        let email = builder
-            .subject(format!("Upcoming shows for {}", today.format(DATE_FORMAT)))
-            .singlepart(SinglePart::html(message))
-            .unwrap();
+    for sub in subscriptions {
+        builder = builder.to(sub.parse().unwrap());
+    }
 
-        let creds = Credentials::new(
-            config.smtp_user.to_string(),
-            config.smtp_password.to_string(),
-        );
+    let email = builder
+        .subject(format!("Upcoming shows for {}", today.format(DATE_FORMAT)))
+        .singlepart(SinglePart::html(message))
+        .unwrap();
 
-        // Open a remote connection to gmail
-        let mailer = SmtpTransport::relay(&config.smtp_host)
-            .unwrap()
-            .credentials(creds)
-            .build();
+    let creds = Credentials::new(
+        config.smtp_user.to_string(),
+        config.smtp_password.to_string(),
+    );
 
-        if let Err(e) = mailer.send(&email) {
-            return Err(Box::new(e));
-        }
+    // Open a remote connection to gmail
+    let mailer = SmtpTransport::relay(&config.smtp_host)
+        .unwrap()
+        .credentials(creds)
+        .build();
+
+    if let Err(e) = mailer.send(&email) {
+        return Err(Box::new(e));
     }
     Ok(())
 }
@@ -169,12 +173,7 @@ async fn get_show_ids(config: &Config) -> Result<Vec<i32>, Box<dyn Error>> {
     Ok(ids)
 }
 
-struct Subscription {
-    email: String,
-    day_limit: i16,
-}
-
-async fn get_subscriptions(config: &Config) -> Result<Vec<Subscription>, Box<dyn Error>> {
+async fn get_subscriptions(config: &Config) -> Result<Vec<String>, Box<dyn Error>> {
     let pg_connection_string = &config.pg_connection_string;
     let builder = SslConnector::builder(SslMethod::tls())?;
     let connector = MakeTlsConnector::new(builder.build());
@@ -185,19 +184,13 @@ async fn get_subscriptions(config: &Config) -> Result<Vec<Subscription>, Box<dyn
     // so spawn it off to run on its own.
     tokio::spawn(async move { connection.await });
 
-    let ids: Vec<Subscription> = client
-        .query(
-            "select email, notification_day_limit from users where email is not null",
-            &[],
-        )
+    let subscriptions: Vec<String> = client
+        .query("select email from users where email is not null", &[])
         .await?
         .into_iter()
-        .map(|row| Subscription {
-            email: row.get(0),
-            day_limit: row.get(1),
-        })
+        .map(|row| row.get(0))
         .collect();
-    Ok(ids)
+    Ok(subscriptions)
 }
 
 fn parse_show(show_id: i32, show_name: &str, episode_details: &Map<String, Value>) -> Show {
