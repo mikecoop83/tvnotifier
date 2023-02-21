@@ -25,6 +25,7 @@ struct Config {
     smtp_user: String,
     smtp_password: String,
     from_email: String,
+    site_url: String,
 }
 
 #[derive(Debug)]
@@ -122,7 +123,7 @@ fn send_email(
             message.push_str("<br />");
         }
     }
-    message.push_str("<br /><br />Manage subscriptions on <a href=\"https://tvnotifier-ui.vercel.app\">TV Notifier UI</a>");
+    message.push_str(format!("<br /><br />Manage subscriptions on <a href=\"{}\">TV Notifier UI</a>", config.site_url).as_ref());
     message.push_str("</pre>");
 
     let mut builder = Message::builder().from(config.from_email.parse().unwrap());
