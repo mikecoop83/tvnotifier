@@ -5,8 +5,10 @@ use lettre::{
 };
 use openssl::ssl::{SslConnector, SslMethod};
 use postgres_openssl::MakeTlsConnector;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::fmt::Formatter;
@@ -26,6 +28,8 @@ struct Config {
     smtp_password: String,
     from_email: String,
     site_url: String,
+    rapid_api_key: String,
+    movie_platforms: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -62,26 +66,58 @@ impl Show {
 
 #[tokio::main]
 async fn main() {
-    let mut config_file = "".to_owned();
+    let mut config_file = String::new();
     let mut no_mail = false;
+    let mut debug = false;
     let _: Vec<String> = go_flag::parse(|flags| {
         flags.add_flag("config", &mut config_file);
         flags.add_flag("nomail", &mut no_mail);
+        flags.add_flag("debug", &mut debug);
     });
 
     let config_content = fs::read_to_string(config_file).expect("config file not found");
     let config = serde_json::from_str::<Config>(&config_content).expect("invalid config");
-    let show_ids = get_show_ids(&config).await.unwrap();
+    let show_ids = get_ids(IdType::Show, &config).await.unwrap();
     let shows = get_shows_parallel(show_ids)
         .await
         .expect("failed getting episode details");
+
+    let movie_ids = get_ids(IdType::Movie, &config).await.unwrap();
+    let subscribed_movie_platforms: HashSet<String> =
+        config.movie_platforms.iter().cloned().collect();
+    let mut movie_to_platforms: std::collections::HashMap<String, HashSet<String>> =
+        std::collections::HashMap::new();
+    for movie_id in movie_ids {
+        let movie = get_streaming_platforms(&config.rapid_api_key, movie_id)
+            .await
+            .expect("failed to get movie platforms");
+        let platforms = movie.platforms;
+        let title = movie.title;
+        let platforms_set: HashSet<String> = platforms.into_iter().collect();
+        let intersection: HashSet<String> = subscribed_movie_platforms
+            .intersection(&platforms_set)
+            .cloned()
+            .collect();
+        if intersection.len() > 0 {
+            movie_to_platforms.insert(title, intersection);
+        }
+    }
+
     if no_mail {
         shows.iter().for_each(|show| println!("{show}"));
+        movie_to_platforms.iter().for_each(|(movie_id, platforms)| {
+            println!(
+                "{movie_id} available on {platforms:?}",
+                movie_id = movie_id,
+                platforms = platforms
+            )
+        });
         return ();
     }
     let subscriptions = get_subscriptions(&config)
         .await
         .expect("failed to get subscriptions");
+
     send_email(&shows, &config, subscriptions).expect("couldn't send the email");
 }
 
@@ -123,7 +159,13 @@ fn send_email(
             message.push_str("<br />");
         }
     }
-    message.push_str(format!("<br /><br />Manage subscriptions on <a href=\"{}\">TV Notifier UI</a>", config.site_url).as_ref());
+    message.push_str(
+        format!(
+            "<br /><br />Manage subscriptions on <a href=\"{}\">TV Notifier UI</a>",
+            config.site_url
+        )
+        .as_ref(),
+    );
     message.push_str("</pre>");
 
     let mut builder = Message::builder().from(config.from_email.parse().unwrap());
@@ -154,7 +196,11 @@ fn send_email(
     Ok(())
 }
 
-async fn get_show_ids(config: &Config) -> Result<Vec<i32>, Box<dyn Error>> {
+enum IdType {
+    Show,
+    Movie,
+}
+async fn get_ids(id_type: IdType, config: &Config) -> Result<Vec<i32>, Box<dyn Error>> {
     let pg_connection_string = &config.pg_connection_string;
     let builder = SslConnector::builder(SslMethod::tls())?;
     let connector = MakeTlsConnector::new(builder.build());
@@ -165,8 +211,13 @@ async fn get_show_ids(config: &Config) -> Result<Vec<i32>, Box<dyn Error>> {
     // so spawn it off to run on its own.
     tokio::spawn(async move { connection.await });
 
+    let id_type_str = match id_type {
+        IdType::Show => "shows",
+        IdType::Movie => "movies",
+    };
+
     let ids: Vec<i32> = client
-        .query("SELECT id FROM shows", &[])
+        .query(format!("SELECT id FROM {id_type_str}").as_str(), &[])
         .await?
         .into_iter()
         .map(|row| row.get(0))
@@ -204,6 +255,82 @@ fn parse_show(show_id: i32, show_name: &str, episode_details: &Map<String, Value
         episode_name: episode_name.to_owned(),
         show_time: show_time.with_timezone(&chrono::Local),
     }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Root {
+    result: MovieResult,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct MovieResult {
+    #[serde(rename = "streamingInfo")]
+    streaming_info: StreamingInfo,
+    title: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct StreamingInfo {
+    us: Vec<Service>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Service {
+    service: String,
+    #[serde(rename = "streamingType")]
+    streaming_type: String,
+    addon: Option<String>,
+}
+
+struct Movie {
+    title: String,
+    platforms: Vec<String>,
+}
+
+async fn get_streaming_platforms(api_key: &str, movie_id: i32) -> Result<Movie, Box<dyn Error>> {
+    let url = format!("https://streaming-availability.p.rapidapi.com/get?output_language=en&tmdb_id=movie/{movie_id}");
+    // add a header for the api key
+
+    let mut headers = HeaderMap::new();
+    headers.insert("X-RapidAPI-Key", HeaderValue::from_str(api_key)?);
+    headers.insert(
+        "X-RapidAPI-Host",
+        HeaderValue::from_static("streaming-availability.p.rapidapi.com"),
+    );
+
+    let client = reqwest::Client::new();
+
+    let response = client.get(url).headers(headers).send().await?;
+
+    if let Err(err) = response.error_for_status_ref() {
+        return Err(Box::new(err));
+    }
+    let body = response.text().await?;
+
+    let root: Root = serde_json::from_str(&body)?;
+
+    let title = root.result.title;
+
+    let subscription_services: Vec<_> = root
+        .result
+        .streaming_info
+        .us
+        .iter()
+        .filter(|service| {
+            service.streaming_type == "subscription" || service.streaming_type == "addon"
+        })
+        .map(|service| {
+            service
+                .addon
+                .clone()
+                .unwrap_or_else(|| service.service.clone())
+        })
+        .collect();
+
+    Ok(Movie {
+        title,
+        platforms: subscription_services,
+    })
 }
 
 async fn get_next_episode(show_id: i32) -> Result<Option<Show>, Box<dyn Error>> {
